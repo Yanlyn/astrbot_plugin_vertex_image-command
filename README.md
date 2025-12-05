@@ -27,7 +27,7 @@
 
 在 AstrBot 插件市场搜索 `vertex` 或 `Vertex AI` 安装本插件。
 
-> ⚠️ **注意**：如果之前安装过其他使用相同指令的图像生成插件（如 `astrbot_plugin_openai_image-command`），请先**停用该插件并重启 AstrBot**，否则可能出现指令冲突导致无法响应。
+> ⚠️ **注意**：如果之前安装过其他使用相同指令的图像生成插件（如 `astrbot_plugin_openai_image-command`），请先**停用该插件并重启 AstrBot**，否则两个插件会同时响应同一条指令。好消息是 AstrBot 的缓存回收机制正常工作，停用后立即生效，无需重启。
 
 ### 3. 配置参数
 
@@ -64,15 +64,32 @@
 ### 核心组件
 
 - **main.py**: 插件主要逻辑，继承自 AstrBot 的 Star 类
-- 支持的指令：
-  - `/生图`：根据文字描述生成图片
-  - `/手办化`：将图片转换为 PVC 手办风格
-  - `/手办化2`：将图片转换为顶级收藏级树脂手办风格
-  - `/手办化3`：将图片转换为 1/7 比例展示柜商业化手办风格
-  - `/改图`：基于已有图片进行改图
-  - `/img帮助`：列出本插件支持的图像相关指令
 - **utils/ttp.py**: Vertex AI Gemini API 调用和图像处理逻辑
 - **utils/file_send_server.py**: 文件传输工具
+
+### 支持的指令
+
+| 指令 | 说明 | 用法示例 |
+|------|------|----------|
+| `/生图` | 根据文字描述生成图片 | `/生图 一只橙色猫咪` |
+| `/手办化` | 将图片转换为 PVC 手办风格 | 发送图片后 `/手办化` |
+| `/手办化2` | 顶级收藏级树脂手办风格 | 发送图片后 `/手办化2` |
+| `/手办化3` | 1/7 比例展示柜商业化手办风格 | 发送图片后 `/手办化3` |
+| `/改图` | 基于已有图片进行改图 | 发送图片后 `/改图 变成水彩风格` |
+| `/img帮助` | 列出本插件支持的指令 | `/img帮助` |
+
+### `/改图` 指令用法
+
+支持以下格式（群聊中需要先 @Bot 唤醒）：
+
+```
+✅ 图片 + /改图 描述       （推荐）
+✅ /改图 描述 + 图片
+✅ 回复图片消息 + /改图 描述
+❌ /改图 + 图片 + 描述     （不支持，图片在指令和描述中间）
+```
+
+**多图支持**：所有图片相关指令都支持同时发送多张参考图片（最多 9 张）
 
 ### 支持的模型
 
@@ -108,7 +125,7 @@ astrbot_plugin_vertex_image-command/
 
 ## 致谢
 
-本插件基于 [AstrBot_plugin_openai_image-command](https://github.com/exynos967/AstrBot_plugin_openai_image-command) 修改而来，感谢原作者 **薄暝 (exynos967)** 的优秀工作。
+本插件基于 [AstrBot_plugin_openai_image-command](https://github.com/exynos967/AstrBot_plugin_openai_image-command) 修改而来，感谢原作者 **薄暝 (exynos967)** 
 
 主要改动：将后端 API 从 OpenAI 兼容格式更换为 Google Vertex AI Gemini API，以便使用 Google Cloud 的图像生成服务。
 

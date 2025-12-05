@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
@@ -269,6 +270,55 @@ class MyPlugin(Star):
                                 logger.error(f"处理引用消息中的图片时出现未预期的错误: {e}")
 
         return images
+
+    def _extract_text_from_message(self, event: AstrMessageEvent, command: str) -> str:
+        """
+        从消息中提取文本内容（排除指令本身），支持图片在文字前后的情况。
+        
+        Args:
+            event: 消息事件
+            command: 指令名称（如 "改图"）
+        
+        Returns:
+            提取到的文本描述
+        """
+        text_parts: list[str] = []
+        
+        # 方法1：从 message_obj.message 组件列表中提取
+        if hasattr(event, "message_obj") and event.message_obj and hasattr(event.message_obj, "message"):
+            for comp in event.message_obj.message:
+                # 处理 Plain 文本组件
+                if isinstance(comp, Plain):
+                    try:
+                        # Plain 组件可能有 text 属性或 toString 方法
+                        if hasattr(comp, 'text') and comp.text:
+                            text = str(comp.text).strip()
+                        elif hasattr(comp, 'toString'):
+                            text = comp.toString().strip()
+                        else:
+                            text = str(comp).strip()
+                        if text:
+                            text_parts.append(text)
+                    except Exception as e:
+                        logger.debug(f"提取Plain组件文本失败: {e}")
+        
+        # 方法2：如果组件提取失败，尝试从 message_str 提取
+        if not text_parts:
+            raw = getattr(event, "message_str", "") or ""
+            if raw:
+                text_parts.append(raw.strip())
+        
+        # 合并所有文本
+        full_text = " ".join(text_parts)
+        
+        # 移除指令部分（如 "/改图" 或 "改图"）
+        pattern = rf'\s*/?{re.escape(command)}\s*'
+        full_text = re.sub(pattern, ' ', full_text, count=1).strip()
+        
+        # 清理多余空格
+        full_text = re.sub(r'\s+', ' ', full_text).strip()
+        
+        return full_text
 
     @filter.command("生图")
     async def generate_image_command(
@@ -543,7 +593,8 @@ Please ensure the final result looks like a real commercial figure product that 
         """改图指令 `/改图`，专注于基于用户提供或引用的图片进行修改。
 
         使用示例：
-        - 发送图片并输入：`/改图 把这张图改成赛博朋克风格`
+        - `/改图 把这张图改成赛博朋克风格` + 图片
+        - `/改图` + 图片 + `把这张图改成赛博朋克风格`
         - 回复一条包含图片的消息并输入：`/改图 给这张图加上蓝色霓虹背景`
         """
         if not self._is_group_allowed(event):
@@ -559,13 +610,10 @@ Please ensure the final result looks like a real commercial figure product that 
         nap_server_address = self.nap_server_address
         nap_server_port = self.nap_server_port
 
-        if not edit_description:
-            raw = getattr(event, "message_str", "") or ""
-            parts = raw.strip().split(" ", 1)
-            if len(parts) == 2:
-                edit_description = parts[1].strip()
-            else:
-                edit_description = ""
+        # 从消息中提取文本描述，支持图片在文字前后的情况
+        extracted_description = self._extract_text_from_message(event, "改图")
+        if extracted_description:
+            edit_description = extracted_description
 
         input_images: list[str] = []
         if use_reference:
