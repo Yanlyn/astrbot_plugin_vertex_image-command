@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import re
 import time
+
+import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
@@ -246,6 +249,8 @@ class MyPlugin(Star):
         返回 base64 字符串列表。
         """
         images: list[str] = []
+        reply_id: str | None = None
+        reply_images_found = False
 
         if hasattr(event, "message_obj") and event.message_obj and hasattr(event.message_obj, "message"):
             for comp in event.message_obj.message:
@@ -253,27 +258,161 @@ class MyPlugin(Star):
                     try:
                         base64_data = await comp.convert_to_base64()
                         images.append(base64_data)
+                        logger.info("从消息中获取到图片")
                     except (IOError, ValueError, OSError) as e:
                         logger.warning(f"转换图片到base64失败: {e}")
                     except Exception as e:
                         logger.error(f"处理图片时出现未预期的错误: {e}")
-                elif isinstance(comp, Reply) and comp.chain:
-                    for reply_comp in comp.chain:
-                        if isinstance(reply_comp, Image):
-                            try:
-                                base64_data = await reply_comp.convert_to_base64()
-                                images.append(base64_data)
-                                logger.info("从引用消息中获取到图片")
-                            except (IOError, ValueError, OSError) as e:
-                                logger.warning(f"转换引用消息中的图片到base64失败: {e}")
-                            except Exception as e:
-                                logger.error(f"处理引用消息中的图片时出现未预期的错误: {e}")
+                elif isinstance(comp, Reply):
+                    # 尝试多种方式获取 reply_id
+                    if hasattr(comp, 'id') and comp.id:
+                        reply_id = str(comp.id)
+                    elif hasattr(comp, 'message_id') and comp.message_id:
+                        reply_id = str(comp.message_id)
+                    elif hasattr(comp, 'data') and isinstance(comp.data, dict):
+                        reply_id = str(comp.data.get('id', ''))
+                    
+                    # 方式1：从 comp.chain 获取（AstrBot 已解析的引用消息内容）
+                    if hasattr(comp, 'chain') and comp.chain:
+                        for reply_comp in comp.chain:
+                            if isinstance(reply_comp, Image):
+                                try:
+                                    base64_data = await reply_comp.convert_to_base64()
+                                    images.append(base64_data)
+                                    logger.info("从引用消息中获取到图片")
+                                    reply_images_found = True
+                                except (IOError, ValueError, OSError) as e:
+                                    logger.warning(f"转换引用消息中的图片到base64失败: {e}")
+                                except Exception as e:
+                                    logger.error(f"处理引用消息中的图片时出现未预期的错误: {e}")
+                    
+                    # 方式2：从 comp.message 获取
+                    if not reply_images_found and hasattr(comp, 'message') and comp.message:
+                        for reply_comp in comp.message:
+                            if isinstance(reply_comp, Image):
+                                try:
+                                    base64_data = await reply_comp.convert_to_base64()
+                                    images.append(base64_data)
+                                    logger.info("从引用消息(message属性)中获取到图片")
+                                    reply_images_found = True
+                                except Exception as e:
+                                    logger.warning(f"处理引用消息图片失败: {e}")
 
+        # 方式3：如果有 reply_id 但没获取到图片，尝试通过 API 获取被引用消息
+        if reply_id and not reply_images_found and not images:
+            logger.info(f"Reply.chain 为空，尝试通过 API 获取被引用消息 (id={reply_id})")
+            fetched_images = await self._fetch_reply_images_via_api(event, reply_id)
+            images.extend(fetched_images)
+
+        return images
+
+    async def _fetch_reply_images_via_api(self, event: AstrMessageEvent, reply_id: str) -> list[str]:
+        """
+        通过 OneBot API 获取被引用消息中的图片。
+        
+        Args:
+            event: 当前消息事件
+            reply_id: 被引用消息的 ID
+        
+        Returns:
+            图片的 base64 字符串列表
+        """
+        images: list[str] = []
+        
+        try:
+            # 尝试获取底层 client 并调用 get_msg API
+            client = None
+            
+            # 方式1：从 event.raw_event 获取 bot 实例
+            if hasattr(event, 'raw_event') and event.raw_event:
+                raw = event.raw_event
+                if hasattr(raw, 'bot'):
+                    client = raw.bot
+                elif hasattr(raw, '_bot'):
+                    client = raw._bot
+            
+            # 方式2：从 context 获取
+            if not client and hasattr(self, 'context') and self.context:
+                # 尝试多种路径获取 client
+                if hasattr(self.context, 'get_platform_client'):
+                    client = self.context.get_platform_client()
+                elif hasattr(self.context, 'platform_manager'):
+                    pm = self.context.platform_manager
+                    if hasattr(pm, 'get_client'):
+                        client = pm.get_client('aiocqhttp')
+            
+            if not client:
+                logger.debug("无法获取底层 client，跳过 API 获取")
+                return images
+            
+            # 调用 get_msg API
+            if hasattr(client, 'call_api'):
+                result = await client.call_api('get_msg', message_id=int(reply_id))
+            elif hasattr(client, 'get_msg'):
+                result = await client.get_msg(message_id=int(reply_id))
+            else:
+                logger.debug("client 没有 call_api 或 get_msg 方法")
+                return images
+            
+            if not result:
+                logger.debug(f"get_msg 返回空结果")
+                return images
+            
+            logger.info(f"成功获取被引用消息: {type(result)}")
+            
+            # 解析返回的消息，提取图片
+            message_content = None
+            if isinstance(result, dict):
+                message_content = result.get('message', [])
+            elif hasattr(result, 'message'):
+                message_content = result.message
+            
+            if not message_content:
+                return images
+            
+            # 遍历消息段，找到图片
+            for seg in message_content:
+                seg_type = None
+                seg_data = None
+                
+                if isinstance(seg, dict):
+                    seg_type = seg.get('type')
+                    seg_data = seg.get('data', {})
+                elif hasattr(seg, 'type'):
+                    seg_type = seg.type
+                    seg_data = getattr(seg, 'data', {})
+                
+                if seg_type == 'image':
+                    # 获取图片 URL
+                    img_url = None
+                    if isinstance(seg_data, dict):
+                        img_url = seg_data.get('url') or seg_data.get('file')
+                    elif hasattr(seg_data, 'url'):
+                        img_url = seg_data.url
+                    
+                    if img_url:
+                        logger.info(f"从被引用消息获取到图片 URL: {img_url[:50]}...")
+                        # 下载图片并转为 base64
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                    if resp.status == 200:
+                                        img_bytes = await resp.read()
+                                        base64_data = base64.b64encode(img_bytes).decode('utf-8')
+                                        images.append(base64_data)
+                                        logger.info("成功通过 API 获取被引用消息中的图片")
+                        except Exception as e:
+                            logger.warning(f"下载图片失败: {e}")
+        
+        except Exception as e:
+            logger.warning(f"通过 API 获取被引用消息失败: {e}")
+        
         return images
 
     def _extract_text_from_message(self, event: AstrMessageEvent, command: str) -> str:
         """
         从消息中提取文本内容（排除指令本身），支持图片在文字前后的情况。
+        支持处理包含换行符的多行提示词。
         
         Args:
             event: 消息事件
@@ -291,12 +430,13 @@ class MyPlugin(Star):
                 if isinstance(comp, Plain):
                     try:
                         # Plain 组件可能有 text 属性或 toString 方法
+                        # 注意：不要 strip()，保留原始文本（包括换行）
                         if hasattr(comp, 'text') and comp.text:
-                            text = str(comp.text).strip()
+                            text = str(comp.text)
                         elif hasattr(comp, 'toString'):
-                            text = comp.toString().strip()
+                            text = comp.toString()
                         else:
-                            text = str(comp).strip()
+                            text = str(comp)
                         if text:
                             text_parts.append(text)
                     except Exception as e:
@@ -306,17 +446,21 @@ class MyPlugin(Star):
         if not text_parts:
             raw = getattr(event, "message_str", "") or ""
             if raw:
-                text_parts.append(raw.strip())
+                text_parts.append(raw)
         
-        # 合并所有文本
+        # 合并所有文本（用空格连接不同组件，但保留组件内部的换行）
         full_text = " ".join(text_parts)
         
-        # 移除指令部分（如 "/改图" 或 "改图"）
-        pattern = rf'\s*/?{re.escape(command)}\s*'
-        full_text = re.sub(pattern, ' ', full_text, count=1).strip()
+        # 移除指令部分（如 "/改图" 或 "改图"），使用 DOTALL 模式处理换行
+        # 匹配指令及其后面可能的空白字符（包括换行）
+        pattern = rf'/?{re.escape(command)}[\s]*'
+        full_text = re.sub(pattern, '', full_text, count=1)
         
-        # 清理多余空格
-        full_text = re.sub(r'\s+', ' ', full_text).strip()
+        # 清理：将多个连续空白字符（空格、制表符）替换为单个空格，但保留换行的语义
+        # 先将换行符替换为特殊标记，清理空格后再换回来（或者直接保留为空格）
+        full_text = re.sub(r'[ \t]+', ' ', full_text)  # 只清理空格和制表符
+        full_text = re.sub(r'\n\s*\n', '\n', full_text)  # 多个换行合并为一个
+        full_text = full_text.strip()
         
         return full_text
 
