@@ -79,11 +79,16 @@ class MyPlugin(Star):
         调用 Vertex AI 图像生成。
 
         Returns:
-            tuple[str | None, str | None]: (image_url, image_path)
+            tuple[str | None, str | None, str | None]: (image_url, image_path, error_reason)
+            error_reason 可能的值：
+            - None: 成功
+            - "SAFETY_BLOCKED": 被安全策略阻止
+            - "API_ERROR": API 配置或网络错误
+            - "NO_API_KEY": 未配置 API 密钥
         """
         if not self.vertex_api_keys:
             logger.error("未配置 vertex_api_key，无法生成图像")
-            return None, None
+            return None, None, "NO_API_KEY"
 
         logger.info(
             f"使用 Vertex AI 生成图像，model={self.model_name}"
@@ -242,6 +247,25 @@ class MyPlugin(Star):
             # 消耗一次配额
             self._rate_limit_state[gid] = (window_start, count + 1)
             return True
+
+    @staticmethod
+    def _get_error_message(error_reason: str | None, command_name: str = "图像生成") -> str:
+        """
+        根据错误原因返回用户友好的错误消息。
+
+        Args:
+            error_reason: 错误原因标识符
+            command_name: 命令名称，用于生成错误消息
+
+        Returns:
+            用户友好的错误消息字符串
+        """
+        if error_reason == "SAFETY_BLOCKED":
+            return f"⚠️ {command_name}被安全策略阻止，请尝试调整提示词或更换图片后重试。"
+        if error_reason == "NO_API_KEY":
+            return f"{command_name}失败：未配置 Vertex AI API 密钥。"
+        # API_ERROR 或其他未知错误
+        return f"{command_name}失败，请检查 Vertex AI API 配置和网络连接。"
 
     async def _collect_input_images(self, event: AstrMessageEvent) -> list[str]:
         """
@@ -499,14 +523,14 @@ class MyPlugin(Star):
         input_images: list = []
 
         try:
-            image_url, image_path = await self._generate_image_via_provider(
+            image_url, image_path, error_reason = await self._generate_image_via_provider(
                 image_description,
                 input_images=input_images,
             )
 
             if not image_url or not image_path:
-                error_chain = [Plain("图像生成失败，请检查API配置和网络连接。")]
-                yield event.chain_result(error_chain)
+                error_msg = self._get_error_message(error_reason, "图像生成")
+                yield event.chain_result([Plain(error_msg)])
                 return
 
             if self.nap_server_address and self.nap_server_address != "localhost":
@@ -575,14 +599,14 @@ Technical Requirements:
 Please ensure the final result looks like a real commercial figure product that could exist in the market."""
 
         try:
-            image_url, image_path = await self._generate_image_via_provider(
+            image_url, image_path, error_reason = await self._generate_image_via_provider(
                 figure_prompt,
                 input_images=input_images,
             )
 
             if not image_url or not image_path:
-                error_chain = [Plain("手办化处理失败，请检查API配置和网络连接。")]
-                yield event.chain_result(error_chain)
+                error_msg = self._get_error_message(error_reason, "手办化处理")
+                yield event.chain_result([Plain(error_msg)])
                 return
 
             if self.nap_server_address and self.nap_server_address != "localhost":
@@ -633,14 +657,14 @@ Please ensure the final result looks like a real commercial figure product that 
         )
 
         try:
-            image_url, image_path = await self._generate_image_via_provider(
+            image_url, image_path, error_reason = await self._generate_image_via_provider(
                 figure_prompt,
                 input_images=input_images,
             )
 
             if not image_url or not image_path:
-                error_chain = [Plain("手办化2处理失败，请检查API配置和网络连接。")]
-                yield event.chain_result(error_chain)
+                error_msg = self._get_error_message(error_reason, "手办化2处理")
+                yield event.chain_result([Plain(error_msg)])
                 return
 
             if self.nap_server_address and self.nap_server_address != "localhost":
@@ -697,14 +721,14 @@ Please ensure the final result looks like a real commercial figure product that 
         )
 
         try:
-            image_url, image_path = await self._generate_image_via_provider(
+            image_url, image_path, error_reason = await self._generate_image_via_provider(
                 figure_prompt,
                 input_images=input_images,
             )
 
             if not image_url or not image_path:
-                error_chain = [Plain("手办化3处理失败，请检查API配置和网络连接。")]
-                yield event.chain_result(error_chain)
+                error_msg = self._get_error_message(error_reason, "手办化3处理")
+                yield event.chain_result([Plain(error_msg)])
                 return
 
             if self.nap_server_address and self.nap_server_address != "localhost":
@@ -773,14 +797,14 @@ Please ensure the final result looks like a real commercial figure product that 
         logger.info(f"改图指令使用了 {len(input_images)} 张图片")
 
         try:
-            image_url, image_path = await self._generate_image_via_provider(
+            image_url, image_path, error_reason = await self._generate_image_via_provider(
                 edit_description,
                 input_images=input_images,
             )
 
             if not image_url or not image_path:
-                error_chain = [Plain("改图失败，请检查 Vertex AI API 配置和网络连接。")]
-                yield event.chain_result(error_chain)
+                error_msg = self._get_error_message(error_reason, "改图")
+                yield event.chain_result([Plain(error_msg)])
                 return
 
             if self.nap_server_address and self.nap_server_address != "localhost":

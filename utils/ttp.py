@@ -179,7 +179,12 @@ async def generate_image_vertex(
         data_dir: 数据存储目录，用于保存生成的图像
 
     Returns:
-        tuple: (image_url, image_path) 或 (None, None)
+        tuple: (image_url, image_path, error_reason) 
+               成功时 error_reason 为 None
+               失败时 image_url 和 image_path 为 None，error_reason 包含错误类型：
+               - "SAFETY_BLOCKED": 被安全策略阻止
+               - "API_ERROR": API 配置或网络错误
+               - "NO_API_KEY": 未配置 API 密钥
     """
     # 标准化 API 密钥列表
     if isinstance(api_key, list):
@@ -191,7 +196,7 @@ async def generate_image_vertex(
 
     if not api_keys:
         logger.error("generate_image_vertex: 未提供 Vertex AI API 密钥")
-        return None, None
+        return None, None, "NO_API_KEY"
 
     # 构建 Vertex AI API URL
     base_url = "https://aiplatform.googleapis.com/v1/publishers/google/models"
@@ -247,7 +252,7 @@ async def generate_image_vertex(
                 current_key = await get_next_api_key(api_keys)
                 if not current_key:
                     logger.error("无可用的 API 密钥")
-                    return None, None
+                    return None, None, "NO_API_KEY"
 
                 url = f"{base_url}/{model}:generateContent?key={current_key}"
                 
@@ -330,7 +335,7 @@ async def generate_image_vertex(
                                 base64_string, image_format, data_dir
                             )
                             if image_url and image_path:
-                                return image_url, image_path
+                                return image_url, image_path, None
 
                         # 如果获取到 URL，尝试下载图像
                         if image_url and image_url.startswith("http"):
@@ -347,7 +352,7 @@ async def generate_image_vertex(
                                             base64_string, image_format, data_dir
                                         )
                                         if image_url and image_path:
-                                            return image_url, image_path
+                                            return image_url, image_path, None
                             except Exception as e:
                                 logger.warning(f"下载图像失败: {e}")
 
@@ -356,14 +361,14 @@ async def generate_image_vertex(
                             feedback = data["promptFeedback"]
                             if "blockReason" in feedback:
                                 logger.warning(f"请求被安全过滤阻止: {feedback['blockReason']}")
-                                return None, None
+                                return None, None, "SAFETY_BLOCKED"
 
                         # 检查 finishReason
                         if "candidates" in data and data["candidates"]:
                             finish_reason = data["candidates"][0].get("finishReason", "")
                             if finish_reason in ["IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "SAFETY"]:
                                 logger.warning(f"图像生成被安全策略阻止: {finish_reason}")
-                                return None, None
+                                return None, None, "SAFETY_BLOCKED"
 
                         logger.warning(f"响应中未找到图像数据，第 {retry_attempt + 1} 次尝试")
                         await rotate_to_next_api_key(api_keys)
@@ -375,7 +380,7 @@ async def generate_image_vertex(
                     elif response.status == 400:
                         logger.error(f"请求参数错误: {response_text[:500]}")
                         # 400 错误通常是请求格式问题，不需要轮换密钥
-                        return None, None
+                        return None, None, "API_ERROR"
 
                     elif response.status == 401 or response.status == 403:
                         logger.error(f"API 认证失败 (状态码 {response.status})，尝试轮换密钥")
@@ -400,7 +405,7 @@ async def generate_image_vertex(
                 await rotate_to_next_api_key(api_keys)
 
     logger.error("Vertex AI API 调用失败，已达到最大重试次数")
-    return None, None
+    return None, None, "API_ERROR"
 
 
 # 保留旧函数名作为别名，方便兼容
