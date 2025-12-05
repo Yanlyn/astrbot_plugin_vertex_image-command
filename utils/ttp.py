@@ -1,0 +1,408 @@
+import aiohttp
+import asyncio
+import aiofiles
+import base64
+import uuid
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+from astrbot.api import logger
+
+
+class ImageGeneratorState:
+    """图像生成器状态管理类，用于处理并发安全"""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self.api_key_index = 0
+        self.last_saved_image = {"url": None, "path": None}
+
+    async def get_current_api_key(self, api_keys):
+        """获取当前使用的API密钥"""
+        async with self._lock:
+            if api_keys and isinstance(api_keys, list) and len(api_keys) > 0:
+                return api_keys[self.api_key_index % len(api_keys)]
+            return None
+
+    async def rotate_to_next_api_key(self, api_keys):
+        """轮换到下一个API密钥"""
+        async with self._lock:
+            if api_keys and isinstance(api_keys, list) and len(api_keys) > 1:
+                self.api_key_index = (self.api_key_index + 1) % len(api_keys)
+                logger.info(f"已轮换到下一个API密钥，当前索引: {self.api_key_index}")
+
+    async def update_saved_image(self, url, path):
+        """更新保存的图像信息"""
+        async with self._lock:
+            self.last_saved_image = {"url": url, "path": path}
+
+    async def get_saved_image_info(self):
+        """获取最后保存的图像信息"""
+        async with self._lock:
+            return self.last_saved_image["url"], self.last_saved_image["path"]
+
+
+# 全局状态管理实例
+_state = ImageGeneratorState()
+
+# 响应文本中图片信息的匹配模式
+_DATA_URL_PATTERN = re.compile(
+    r"(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)"
+)
+_HTTP_URL_PATTERN = re.compile(r"(https?://[^\s)]+)")
+
+
+async def cleanup_old_images(data_dir=None):
+    """
+    清理超过15分钟的图像文件
+
+    Args:
+        data_dir (Path): 数据目录路径，如果为None则使用当前脚本目录
+    """
+    try:
+        if data_dir is None:
+            script_dir = Path(__file__).parent.parent
+            data_dir = script_dir
+
+        images_dir = data_dir / "images"
+
+        if not images_dir.exists():
+            return
+
+        current_time = datetime.now()
+        cutoff_time = current_time - timedelta(minutes=15)
+
+        # 查找images目录下的所有图像文件
+        image_patterns = [
+            "vertex_image_*.png",
+            "vertex_image_*.jpg",
+            "vertex_image_*.jpeg",
+            "gemini_image_*.png",
+            "gemini_image_*.jpg",
+            "gemini_image_*.jpeg",
+        ]
+
+        for pattern in image_patterns:
+            for file_path in images_dir.glob(pattern):
+                try:
+                    file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                    if file_mtime < cutoff_time:
+                        file_path.unlink()
+                        logger.debug(f"已清理过期图像: {file_path.name}")
+                except OSError as e:
+                    logger.warning(f"清理文件 {file_path} 时出错: {e}")
+
+    except Exception as e:
+        logger.error(f"清理过期图像时发生错误: {e}")
+
+
+async def save_base64_image(base64_string, image_format="png", data_dir=None):
+    """
+    将base64编码的图像保存到文件
+
+    Args:
+        base64_string (str): base64编码的图像数据
+        image_format (str): 图像格式
+        data_dir (Path): 数据目录路径
+
+    Returns:
+        tuple: (image_url, image_path)
+    """
+    try:
+        if data_dir is None:
+            script_dir = Path(__file__).parent.parent
+            data_dir = script_dir
+
+        images_dir = data_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 清理过期图像
+        await cleanup_old_images(data_dir)
+
+        # 生成唯一文件名
+        unique_id = uuid.uuid4().hex[:8]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"vertex_image_{timestamp}_{unique_id}.{image_format}"
+        file_path = images_dir / filename
+
+        # 解码并保存图像
+        image_data = base64.b64decode(base64_string)
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(image_data)
+
+        image_url = f"file://{file_path}"
+        image_path = str(file_path)
+
+        await _state.update_saved_image(image_url, image_path)
+
+        logger.info(f"图像已保存: {file_path}")
+        return image_url, image_path
+
+    except Exception as e:
+        logger.error(f"保存图像时发生错误: {e}")
+        return None, None
+
+
+async def get_next_api_key(api_keys):
+    """获取当前API密钥"""
+    return await _state.get_current_api_key(api_keys)
+
+
+async def rotate_to_next_api_key(api_keys):
+    """轮换到下一个API密钥"""
+    await _state.rotate_to_next_api_key(api_keys)
+
+
+async def get_saved_image_info():
+    """获取最后保存的图像信息"""
+    return await _state.get_saved_image_info()
+
+
+async def generate_image_vertex(
+    prompt,
+    api_key,
+    model: str = "gemini-3-pro-image-preview",
+    input_images=None,
+    max_retry_attempts: int = 3,
+):
+    """
+    使用 Google Vertex AI Gemini 模型生成图像
+
+    Args:
+        prompt (str): 图像生成提示词
+        api_key: API密钥，可以是字符串或字符串列表
+        model (str): 使用的模型名称
+        input_images: 输入图像列表（base64编码）
+        max_retry_attempts (int): 最大重试次数
+
+    Returns:
+        tuple: (image_url, image_path) 或 (None, None)
+    """
+    # 标准化 API 密钥列表
+    if isinstance(api_key, list):
+        api_keys = [k for k in (str(k).strip() for k in api_key or []) if k]
+    elif api_key:
+        api_keys = [str(api_key).strip()]
+    else:
+        api_keys = []
+
+    if not api_keys:
+        logger.error("generate_image_vertex: 未提供 Vertex AI API 密钥")
+        return None, None
+
+    # 构建 Vertex AI API URL
+    base_url = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+    
+    # 构建请求内容
+    parts = []
+    
+    # 添加文本提示
+    # 添加明确的图像生成指令
+    full_prompt = f"Generate an image based on the following description. Output only the image, no text explanation needed.\n\n{prompt}"
+    parts.append({"text": full_prompt})
+    
+    # 添加输入图像（如果有）
+    if input_images:
+        for img_base64 in input_images:
+            if img_base64:
+                # 清理 base64 字符串
+                clean_base64 = img_base64
+                if clean_base64.startswith("data:"):
+                    # 提取纯 base64 部分
+                    try:
+                        clean_base64 = clean_base64.split(",", 1)[1]
+                    except IndexError:
+                        pass
+                
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": clean_base64
+                    }
+                })
+        logger.info(f"已添加 {len(input_images)} 张参考图片")
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": parts
+            }
+        ],
+        "generationConfig": {
+            "temperature": 1.0,
+            "topP": 0.95,
+            "maxOutputTokens": 8192
+        }
+    }
+
+    timeout = aiohttp.ClientTimeout(total=120)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for retry_attempt in range(max_retry_attempts):
+            try:
+                current_key = await get_next_api_key(api_keys)
+                if not current_key:
+                    logger.error("无可用的 API 密钥")
+                    return None, None
+
+                url = f"{base_url}/{model}:generateContent?key={current_key}"
+                
+                headers = {
+                    "Content-Type": "application/json"
+                }
+
+                if retry_attempt > 0:
+                    delay = min(2 ** retry_attempt, 10)
+                    logger.info(
+                        f"第 {retry_attempt + 1} 次重试，等待 {delay} 秒..."
+                    )
+                    await asyncio.sleep(delay)
+
+                async with session.post(url, json=payload, headers=headers) as response:
+                    response_text = await response.text()
+                    
+                    if retry_attempt == 0:
+                        logger.debug(f"Vertex AI API 响应状态: {response.status}")
+
+                    if response.status == 200:
+                        try:
+                            import json
+                            data = json.loads(response_text)
+                        except Exception as e:
+                            logger.error(f"解析响应 JSON 失败: {e}")
+                            await rotate_to_next_api_key(api_keys)
+                            continue
+
+                        # 解析响应，查找生成的图像
+                        image_url = None
+                        image_path = None
+                        image_format = "png"
+                        base64_string = None
+
+                        if "candidates" in data and data["candidates"]:
+                            candidate = data["candidates"][0]
+                            content = candidate.get("content", {})
+                            parts = content.get("parts", [])
+
+                            for part in parts:
+                                # 检查 inlineData（图像数据）
+                                if "inlineData" in part:
+                                    inline_data = part["inlineData"]
+                                    mime_type = inline_data.get("mimeType", "image/png")
+                                    base64_string = inline_data.get("data")
+                                    
+                                    # 从 MIME 类型提取格式
+                                    if "/" in mime_type:
+                                        image_format = mime_type.split("/")[1].split(";")[0]
+                                    
+                                    if base64_string:
+                                        logger.info(f"从响应中获取到图像数据，格式: {image_format}")
+                                        break
+                                
+                                # 检查文本中是否包含 base64 图像
+                                elif "text" in part:
+                                    text = part["text"]
+                                    # 尝试匹配 data URL
+                                    data_match = _DATA_URL_PATTERN.search(text)
+                                    if data_match:
+                                        candidate_url = data_match.group(1)
+                                        try:
+                                            header, base64_part = candidate_url.split(",", 1)
+                                            image_format = header.split("/")[1].split(";")[0]
+                                            base64_string = base64_part
+                                            logger.info("从文本响应中提取到 base64 图像")
+                                            break
+                                        except Exception as e:
+                                            logger.warning(f"解析文本中的 data URL 失败: {e}")
+                                    
+                                    # 尝试匹配 HTTP URL
+                                    url_match = _HTTP_URL_PATTERN.search(text)
+                                    if url_match:
+                                        image_url = url_match.group(1)
+                                        logger.info(f"从文本响应中提取到图像 URL: {image_url}")
+
+                        # 如果获取到 base64 图像数据，保存到文件
+                        if base64_string:
+                            image_url, image_path = await save_base64_image(
+                                base64_string, image_format
+                            )
+                            if image_url and image_path:
+                                return image_url, image_path
+
+                        # 如果获取到 URL，尝试下载图像
+                        if image_url and image_url.startswith("http"):
+                            try:
+                                async with session.get(image_url) as img_response:
+                                    if img_response.status == 200:
+                                        img_data = await img_response.read()
+                                        base64_string = base64.b64encode(img_data).decode("utf-8")
+                                        image_url, image_path = await save_base64_image(
+                                            base64_string, image_format
+                                        )
+                                        if image_url and image_path:
+                                            return image_url, image_path
+                            except Exception as e:
+                                logger.warning(f"下载图像失败: {e}")
+
+                        # 检查是否有安全过滤导致的阻止
+                        if "promptFeedback" in data:
+                            feedback = data["promptFeedback"]
+                            if "blockReason" in feedback:
+                                logger.warning(f"请求被安全过滤阻止: {feedback['blockReason']}")
+                                return None, None
+
+                        # 检查 finishReason
+                        if "candidates" in data and data["candidates"]:
+                            finish_reason = data["candidates"][0].get("finishReason", "")
+                            if finish_reason in ["IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "SAFETY"]:
+                                logger.warning(f"图像生成被安全策略阻止: {finish_reason}")
+                                return None, None
+
+                        logger.warning(f"响应中未找到图像数据，第 {retry_attempt + 1} 次尝试")
+                        await rotate_to_next_api_key(api_keys)
+
+                    elif response.status == 429:
+                        logger.warning("API 请求频率限制，尝试轮换密钥")
+                        await rotate_to_next_api_key(api_keys)
+
+                    elif response.status == 400:
+                        logger.error(f"请求参数错误: {response_text[:500]}")
+                        # 400 错误通常是请求格式问题，不需要轮换密钥
+                        return None, None
+
+                    elif response.status == 401 or response.status == 403:
+                        logger.error(f"API 认证失败 (状态码 {response.status})，尝试轮换密钥")
+                        await rotate_to_next_api_key(api_keys)
+
+                    else:
+                        logger.warning(
+                            f"API 请求失败，状态码: {response.status}，响应: {response_text[:500]}"
+                        )
+                        await rotate_to_next_api_key(api_keys)
+
+            except asyncio.TimeoutError:
+                logger.warning(f"API 请求超时，第 {retry_attempt + 1} 次尝试")
+                await rotate_to_next_api_key(api_keys)
+
+            except aiohttp.ClientError as e:
+                logger.warning(f"网络请求错误: {e}，第 {retry_attempt + 1} 次尝试")
+                await rotate_to_next_api_key(api_keys)
+
+            except Exception as e:
+                logger.error(f"未预期的错误: {e}")
+                await rotate_to_next_api_key(api_keys)
+
+    logger.error("Vertex AI API 调用失败，已达到最大重试次数")
+    return None, None
+
+
+# 保留旧函数名作为别名，方便兼容
+async def generate_image_openai(*args, **kwargs):
+    """
+    已废弃：请使用 generate_image_vertex
+    """
+    logger.warning(
+        "generate_image_openai 已废弃，请使用 generate_image_vertex"
+    )
+    return await generate_image_vertex(*args, **kwargs)

@@ -1,0 +1,62 @@
+{
+    "vertex_api_key": {
+        "description": "Vertex AI API 密钥列表",
+        "type": "list",
+        "hint": "仅支持 Vertex AI 的 Key（从 Google Cloud Console 获取），AI Studio 的 Key 不可用。",
+        "default": [],
+        "obvious_hint": true
+    },
+    "model_name": {
+        "description": "使用的 Gemini 图像生成模型名称",
+        "type": "string",
+        "hint": "直接填写模型名（无需前缀），如 gemini-3-pro-image-preview。可用模型见 README。",
+        "default": "gemini-3-pro-image-preview",
+        "obvious_hint": true
+    },
+    "max_retry_attempts": {
+        "description": "Vertex AI 图像请求的最大重试次数",
+        "type": "int",
+        "hint": "当 API 请求失败时最多重试几次。推荐 2-5 次，设置过高可能导致响应时间过长",
+        "default": 3,
+        "obvious_hint": true
+    },
+    "nap_server_address": {
+        "description": "NAPcat 服务地址，若与服务器在同一服务器上请填写 localhost",
+        "type": "string",
+        "default": "localhost"
+    },
+    "nap_server_port": {
+        "description": "NAPcat 所处服务器接收文件端口，在同一服务器上可以不填",
+        "type": "int",
+        "default": 3658
+    },
+    "group_filter_mode": {
+        "description": "群过滤模式",
+        "type": "string",
+        "hint": "whitelist: 仅名单内群可用；blacklist: 名单内群禁用；none: 不过滤。",
+        "default": "none",
+        "options": ["none", "whitelist", "blacklist"],
+        "obvious_hint": false
+    },
+    "group_filter_list": {
+        "description": "群过滤名单（根据模式作为白名单或黑名单）",
+        "type": "list",
+        "hint": "填写群号字符串列表。",
+        "default": [],
+        "obvious_hint": false
+    },
+    "rate_limit_max_calls_per_group": {
+        "description": "单群调用次数上限（每周期）",
+        "type": "int",
+        "hint": "0 表示不启用限流；大于 0 时，一个群在一个周期内最多可调用本插件指令次数。",
+        "default": 0,
+        "obvious_hint": false
+    },
+    "rate_limit_period_seconds": {
+        "description": "限流周期长度（秒）",
+        "type": "int",
+        "hint": "与单群调用次数上限配合使用，默认为 60 秒。",
+        "default": 60,
+        "obvious_hint": false
+    }
+}
