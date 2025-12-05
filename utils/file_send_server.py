@@ -1,4 +1,5 @@
 import aiohttp
+from pathlib import Path
 from astrbot.api import logger
 
 
@@ -23,7 +24,7 @@ async def send_file(file_path: str, HOST: str = "localhost", PORT: int = 3658) -
                 data.add_field(
                     "file",
                     f,
-                    filename=file_path.split("/")[-1].split("\\")[-1],
+                    filename=Path(file_path).name,
                     content_type="application/octet-stream",
                 )
 

@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 import aiofiles
 import base64
+import json
 import uuid
 import re
 from datetime import datetime, timedelta
@@ -57,13 +58,13 @@ async def cleanup_old_images(data_dir=None):
     清理超过15分钟的图像文件
 
     Args:
-        data_dir (Path): 数据目录路径，如果为None则使用当前脚本目录
+        data_dir (Path): 数据目录路径，必须提供
     """
-    try:
-        if data_dir is None:
-            script_dir = Path(__file__).parent.parent
-            data_dir = script_dir
+    if data_dir is None:
+        logger.warning("cleanup_old_images: 未提供 data_dir，跳过清理")
+        return
 
+    try:
         images_dir = data_dir / "images"
 
         if not images_dir.exists():
@@ -103,16 +104,16 @@ async def save_base64_image(base64_string, image_format="png", data_dir=None):
     Args:
         base64_string (str): base64编码的图像数据
         image_format (str): 图像格式
-        data_dir (Path): 数据目录路径
+        data_dir (Path): 数据目录路径，必须提供
 
     Returns:
         tuple: (image_url, image_path)
     """
-    try:
-        if data_dir is None:
-            script_dir = Path(__file__).parent.parent
-            data_dir = script_dir
+    if data_dir is None:
+        logger.error("save_base64_image: 未提供 data_dir，无法保存图像")
+        return None, None
 
+    try:
         images_dir = data_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -269,7 +270,6 @@ async def generate_image_vertex(
 
                     if response.status == 200:
                         try:
-                            import json
                             data = json.loads(response_text)
                         except Exception as e:
                             logger.error(f"解析响应 JSON 失败: {e}")
@@ -337,6 +337,10 @@ async def generate_image_vertex(
                             try:
                                 async with session.get(image_url) as img_response:
                                     if img_response.status == 200:
+                                        # 从 Content-Type 获取正确的图片格式
+                                        content_type = img_response.headers.get("Content-Type", "image/png")
+                                        if "/" in content_type:
+                                            image_format = content_type.split("/")[1].split(";")[0]
                                         img_data = await img_response.read()
                                         base64_string = base64.b64encode(img_data).decode("utf-8")
                                         image_url, image_path = await save_base64_image(
