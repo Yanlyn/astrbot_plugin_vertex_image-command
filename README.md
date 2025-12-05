@@ -23,7 +23,13 @@
 >
 > 💰 新用户可获得 **$300 免费额度**，[详见说明](https://cloud.google.com/free/docs/free-cloud-features)
 
-### 2. 配置参数
+### 2. 安装插件
+
+在 AstrBot 插件市场搜索 `vertex` 或 `Vertex AI` 安装本插件。
+
+> ⚠️ **注意**：如果之前安装过其他使用相同指令的图像生成插件（如 `astrbot_plugin_openai_image-command`），请先**卸载该插件并重启 AstrBot**，否则可能出现指令冲突导致无法响应。
+
+### 3. 配置参数
 
 #### 通过Web界面配置
 
