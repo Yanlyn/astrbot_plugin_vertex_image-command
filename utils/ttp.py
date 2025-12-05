@@ -164,6 +164,7 @@ async def generate_image_vertex(
     model: str = "gemini-3-pro-image-preview",
     input_images=None,
     max_retry_attempts: int = 3,
+    data_dir=None,
 ):
     """
     使用 Google Vertex AI Gemini 模型生成图像
@@ -174,6 +175,7 @@ async def generate_image_vertex(
         model (str): 使用的模型名称
         input_images: 输入图像列表（base64编码）
         max_retry_attempts (int): 最大重试次数
+        data_dir: 数据存储目录，用于保存生成的图像
 
     Returns:
         tuple: (image_url, image_path) 或 (None, None)
@@ -325,7 +327,7 @@ async def generate_image_vertex(
                         # 如果获取到 base64 图像数据，保存到文件
                         if base64_string:
                             image_url, image_path = await save_base64_image(
-                                base64_string, image_format
+                                base64_string, image_format, data_dir
                             )
                             if image_url and image_path:
                                 return image_url, image_path
@@ -338,7 +340,7 @@ async def generate_image_vertex(
                                         img_data = await img_response.read()
                                         base64_string = base64.b64encode(img_data).decode("utf-8")
                                         image_url, image_path = await save_base64_image(
-                                            base64_string, image_format
+                                            base64_string, image_format, data_dir
                                         )
                                         if image_url and image_path:
                                             return image_url, image_path

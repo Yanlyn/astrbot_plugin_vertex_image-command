@@ -1,7 +1,7 @@
 import asyncio
 import time
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.all import Image, Plain
 from astrbot.core.message.components import Reply
@@ -85,12 +85,16 @@ class MyPlugin(Star):
             f"使用 Vertex AI 生成图像，model={self.model_name}"
         )
 
+        # 使用 StarTools 获取标准数据目录，避免污染源码目录
+        data_dir = StarTools.get_data_dir("vertex_image-command")
+
         return await generate_image_vertex(
             prompt,
             api_key=self.vertex_api_keys,
             model=self.model_name,
             input_images=input_images,
             max_retry_attempts=self.max_retry_attempts,
+            data_dir=data_dir,
         )
 
     @staticmethod
